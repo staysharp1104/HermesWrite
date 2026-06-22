@@ -46,7 +46,9 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
     [
         "delegate_task",  # no recursive delegation
         "clarify",  # no user interaction
-        "memory",  # no writes to shared MEMORY.md
+        # "memory" is intentionally NOT blocked — writing agents (hermes3)
+        # need shared access to project-level memory (character profiles,
+        # worldbuilding docs, plot outlines) for multi-agent consistency.
         "send_message",  # no cross-platform side effects
         "execute_code",  # children should reason step-by-step, not write scripts
     ]

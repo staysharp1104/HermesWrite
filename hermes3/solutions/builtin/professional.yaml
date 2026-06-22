@@ -1,0 +1,33 @@
+name: 专业辅助
+description: 轻量级创作辅助方案，仅启用核心 Agent，适合快速写作或碎片化创作
+version: "1.0"
+default_model: deepseek-chat
+agents:
+  - role: radar
+    enabled: false
+  - role: planner
+    enabled: true
+  - role: chief
+    enabled: true
+  - role: brainstorm
+    enabled: false
+  - role: worldbuilding
+    enabled: false
+  - role: character
+    enabled: true
+  - role: golden_finger
+    enabled: false
+  - role: entry
+    enabled: false
+  - role: naming
+    enabled: false
+  - role: outline
+    enabled: true
+  - role: detailed_outline
+    enabled: false
+  - role: golden_opening
+    enabled: false
+  - role: title
+    enabled: false
+  - role: synopsis
+    enabled: false

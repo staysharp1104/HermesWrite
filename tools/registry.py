@@ -64,6 +64,16 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
         and _module_registers_tools(path)
     ]
 
+    # Also scan hermes3/tools/ for novel-writing tools
+    hermes3_tools_path = tools_path.parent / "hermes3" / "tools"
+    if hermes3_tools_path.is_dir():
+        module_names.extend([
+            f"hermes3.tools.{path.stem}"
+            for path in sorted(hermes3_tools_path.glob("*.py"))
+            if path.name not in {"__init__.py"}
+            and _module_registers_tools(path)
+        ])
+
     imported: List[str] = []
     for mod_name in module_names:
         try:

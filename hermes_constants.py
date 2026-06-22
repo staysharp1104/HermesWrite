@@ -222,6 +222,18 @@ def get_bundled_skills_dir(default: Path | None = None) -> Path:
     return get_hermes_home() / "skills"
 
 
+def get_project_home() -> Path:
+    """Return the hermes3 project root by walking up from CWD looking for ``.feelfish/``.
+
+    Falls back to the current working directory if no ``.feelfish`` is found.
+    """
+    cwd = Path.cwd()
+    for parent in [cwd] + list(cwd.parents):
+        if (parent / ".feelfish").is_dir():
+            return parent
+    return cwd
+
+
 def get_hermes_dir(new_subpath: str, old_name: str) -> Path:
     """Resolve a Hermes subdirectory with backward compatibility.
 

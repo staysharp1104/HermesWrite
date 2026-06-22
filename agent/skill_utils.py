@@ -497,12 +497,24 @@ def get_external_skills_dirs() -> List[Path]:
 
 
 def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+    """Return all skill directories: project `.feelfish/skills/` first,
+    then local ``~/.hermes/skills/``, then external in config order.
 
-    The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    Project-level skills take highest priority so hermes3 novel projects
+    can override built-in Agent SKILL.md files locally.
     """
-    dirs = [get_skills_dir()]
+    dirs = []
+
+    # Project-level skills (.feelfish/skills/) — highest priority
+    cwd = Path.cwd()
+    project_skills = cwd / ".feelfish" / "skills"
+    if project_skills.is_dir():
+        dirs.append(project_skills)
+
+    # Local user skills
+    dirs.append(get_skills_dir())
+
+    # External skills from config
     dirs.extend(get_external_skills_dirs())
     return dirs
 

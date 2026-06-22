@@ -12965,3 +12965,144 @@ def start_server(
                 await server.shutdown()
 
     asyncio.run(_serve())
+
+
+# ── hermes3 API routes ──────────────────────────────────────────────
+# 侧边栏面板数据通过这里加载，前端通过 window.hermesDesktop.api() 调用
+# 路由格式: POST /api/hermes3/{method}  →  JSON-RPC 风格的远程调用
+
+
+@app.post("/api/hermes3/solutions.list")
+async def hermes3_solutions_list():
+    try:
+        from hermes3.solutions.manager import SolutionManager
+        sm = SolutionManager()
+        sols = sm.list_all()
+        return {"success": True, "solutions": list(sols.keys())}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/solutions.activate")
+async def hermes3_solutions_activate(body: dict):
+    try:
+        from hermes3.solutions.manager import SolutionManager
+        sm = SolutionManager()
+        sol = sm.activate(body.get("name", ""))
+        return {"success": sol is not None}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/characters.list")
+async def hermes3_characters_list():
+    try:
+        from hermes3.tools.novel_tools import _project_subdir
+        chars_dir = _project_subdir("characters")
+        names = sorted(f.stem for f in chars_dir.glob("*.md"))
+        return {"success": True, "characters": names}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/worldbuilding.list")
+async def hermes3_worldbuilding_list():
+    try:
+        from hermes3.tools.novel_tools import _project_subdir
+        base = _project_subdir("worldbuilding")
+        result: dict[str, list[str]] = {}
+        for cat_dir in sorted(base.iterdir()):
+            if cat_dir.is_dir():
+                result[cat_dir.name] = sorted(f.stem for f in cat_dir.glob("*.md"))
+        return {"success": True, "categories": result}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/rules.list")
+async def hermes3_rules_list():
+    try:
+        from hermes3.tools.novel_tools import _project_subdir
+        rules_dir = _project_subdir("rules")
+        names = sorted(f.stem for f in rules_dir.glob("*.md"))
+        return {"success": True, "rules": names}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/outline.get")
+async def hermes3_outline_get():
+    try:
+        from hermes3.tools.novel_tools import _project_subdir
+        outline_path = _project_subdir("outline") / "master-outline.md"
+        content = outline_path.read_text(encoding="utf-8") if outline_path.exists() else ""
+        return {"success": True, "content": content}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/skills.list")
+async def hermes3_skills_list():
+    try:
+        skills_dir = __import__("pathlib").Path.cwd() / ".feelfish" / "skills"
+        names = [d.name for d in sorted(skills_dir.iterdir())
+                 if d.is_dir() and (d / "SKILL.md").exists()] if skills_dir.is_dir() else []
+        return {"success": True, "skills": names}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/records.stats")
+async def hermes3_records_stats():
+    try:
+        from hermes3.tools.novel_tools import _project_subdir
+        chars = list(_project_subdir("characters").glob("*.md"))
+        chapters = list(_project_subdir("chapters").rglob("*.md"))
+        return {"success": True, "words": 0, "sessions": len(chapters), "characters": len(chars)}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/search")
+async def hermes3_search(body: dict):
+    try:
+        query = body.get("query", "")
+        from hermes3.tools.novel_tools import _project_subdir, _search_directory
+        feelfish = _project_subdir("").parent
+        results = []
+        for sub in ["characters", "worldbuilding", "outline", "chapters", "knowledge"]:
+            base = feelfish / sub
+            if base.is_dir():
+                results.extend(_search_directory(base, query, 5))
+        return {"success": True, "query": query, "results": results[:20]}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.post("/api/hermes3/agent.context")
+async def hermes3_agent_context(body: dict):
+    """返回 Agent 的完整上下文（prompt + SKILL.md），用于注入 AI 对话 system message"""
+    try:
+        agent_name = body.get("agent", "")
+        if not agent_name:
+            return {"success": False, "error": "agent name required"}
+        from pathlib import Path
+        hermes3_dir = Path(__file__).resolve().parent.parent
+        parts: list[str] = []
+        # 1) 加载专属 prompt
+        prompt_path = hermes3_dir / "hermes3" / "agents" / "prompts" / f"{agent_name}.md"
+        if prompt_path.is_file():
+            parts.append(f"## 角色定义\n\n{prompt_path.read_text(encoding='utf-8')}")
+        # 2) 加载 SKILL.md（查找链：项目级 → 全局 → 内置）
+        skill_paths = [
+            Path.cwd() / ".feelfish" / "skills" / agent_name / "SKILL.md",
+            Path.home() / ".hermes" / "skills" / agent_name / "SKILL.md",
+            hermes3_dir / "skills" / agent_name / "SKILL.md",
+        ]
+        for sp in skill_paths:
+            if sp.is_file():
+                parts.append(f"## 技能文档\n\n{sp.read_text(encoding='utf-8')}")
+                break
+        return {"success": True, "agent": agent_name, "prompt": "\n\n".join(parts)}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}

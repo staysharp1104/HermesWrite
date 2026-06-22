@@ -1,0 +1,37 @@
+name: 多智能体协同创作
+description: 启用全部 14 个 Agent 的完整创作方案，适用于专业级长篇小说创作
+version: "1.0"
+default_model: deepseek-chat
+agent_model_overrides:
+  brainstorm: deepseek-reasoner
+  outline: deepseek-chat
+  golden_opening: deepseek-chat
+agents:
+  - role: radar
+    enabled: false
+  - role: planner
+    enabled: true
+  - role: chief
+    enabled: true
+  - role: brainstorm
+    enabled: true
+  - role: worldbuilding
+    enabled: true
+  - role: character
+    enabled: true
+  - role: golden_finger
+    enabled: true
+  - role: entry
+    enabled: true
+  - role: naming
+    enabled: true
+  - role: outline
+    enabled: true
+  - role: detailed_outline
+    enabled: true
+  - role: golden_opening
+    enabled: true
+  - role: title
+    enabled: true
+  - role: synopsis
+    enabled: true

@@ -167,6 +167,15 @@ TOOLSETS = {
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
+
+    "hermes3": {
+        "description": "Novel writing tools for hermes3 — character/worldbuilding/plot management, style analysis, consistency checking, and full-text search",
+        "tools": [
+            "novel_character", "novel_worldbuilding", "novel_plot",
+            "novel_style", "novel_consistency", "novel_search",
+        ],
+        "includes": []
+    },
     
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",

@@ -5452,10 +5452,13 @@ function createWindow() {
     rememberLog(`[renderer console] ${text} (${src}:${lineNo})`)
   })
 
+  const isHermes3 = process.argv.includes('--hermes3')
+  const hermes3Suffix = isHermes3 ? '#/hermes3' : ''
+
   if (DEV_SERVER) {
-    mainWindow.loadURL(DEV_SERVER)
+    mainWindow.loadURL(DEV_SERVER + hermes3Suffix)
   } else {
-    mainWindow.loadURL(pathToFileURL(resolveRendererIndex()).toString())
+    mainWindow.loadURL(pathToFileURL(resolveRendererIndex()).toString() + hermes3Suffix)
   }
 
   mainWindow.webContents.once('did-finish-load', () => {
@@ -5781,6 +5784,75 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
   merged.sort((a, b) => recency(b) - recency(a))
   return { ...base, sessions: merged.slice(offset, offset + limit), total, profile_totals: profileTotals }
 }
+
+ipcMain.handle('hermes3:chat', async (_event, { messages }) => {
+  // 从 ~/.hermes/.env 中读取 API Key
+  let apiKey = process.env.OPENAI_API_KEY || ''
+  let baseUrl = process.env.OPENAI_BASE_URL || 'https://api.deepseek.com'
+  if (!apiKey) {
+    try {
+      const envPath = path.join(HERMES_HOME, '.env')
+      if (fs.existsSync(envPath)) {
+        const envText = fs.readFileSync(envPath, 'utf8')
+        for (const line of envText.split('\n')) {
+          const trimmed = line.trim()
+          if (trimmed.startsWith('OPENAI_API_KEY=')) {
+            apiKey = trimmed.split('=', 2).slice(1).join('=').replace(/^["']|["']$/g, '').trim()
+          } else if (trimmed.startsWith('OPENAI_BASE_URL=')) {
+            const val = trimmed.split('=', 2).slice(1).join('=').replace(/^["']|["']$/g, '').trim()
+            if (val) baseUrl = val
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  if (!apiKey) {
+    return { error: 'No API key configured. Set OPENAI_API_KEY in ~/.hermes/.env' }
+  }
+  try {
+    const url = `${baseUrl}/v1/chat/completions`
+    // 使用 Node https 模块直接请求，正确设置 Authorization header
+    const https = require('node:https')
+    const http = require('node:http')
+    const parsed = new URL(url)
+    const client = parsed.protocol === 'https:' ? https : http
+    const body = Buffer.from(JSON.stringify({
+      model: 'deepseek-chat',
+      messages,
+      max_tokens: 4096,
+      temperature: 0.8,
+    }))
+    const result = await new Promise((resolve, reject) => {
+      const req = client.request(parsed, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Length': String(body.length),
+        },
+      }, res => {
+        const chunks = []
+        res.on('error', reject)
+        res.on('data', c => chunks.push(c))
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8')
+          if ((res.statusCode || 500) >= 400) {
+            reject(new Error(`${res.statusCode}: ${text.slice(0, 200)}`))
+            return
+          }
+          try { resolve(JSON.parse(text)) }
+          catch { reject(new Error(`Invalid JSON: ${text.slice(0, 200)}`)) }
+        })
+      })
+      req.on('error', reject)
+      req.write(body)
+      req.end()
+    })
+    return result
+  } catch (err) {
+    return { error: String(err) }
+  }
+})
 
 ipcMain.handle('hermes:api', async (_event, request) => {
   // Remote-profile session requests would otherwise hit the local primary off

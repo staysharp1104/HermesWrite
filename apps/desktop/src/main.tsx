@@ -3,11 +3,12 @@ import './styles.css'
 import './store/translucency'
 
 import { QueryClientProvider } from '@tanstack/react-query'
-import { StrictMode } from 'react'
+import { StrictMode, useCallback, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router-dom'
 
 import App from './app'
+import { Hermes3App } from './app/hermes3/App'
 import { ErrorBoundary } from './components/error-boundary'
 import { HapticsProvider } from './components/haptics-provider'
 import { I18nProvider } from './i18n'
@@ -26,20 +27,41 @@ if (import.meta.env.MODE !== 'production') {
   import('./app/chat/perf-probe')
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ErrorBoundary label="root">
-      <QueryClientProvider client={queryClient}>
-        <I18nProvider>
-          <ThemeProvider>
-            <HapticsProvider>
-              <HashRouter>
-                <App />
-              </HashRouter>
-            </HapticsProvider>
-          </ThemeProvider>
-        </I18nProvider>
-      </QueryClientProvider>
-    </ErrorBoundary>
-  </StrictMode>
-)
+// 检测是否以 --hermes3 模式启动
+function useHermes3Mode(): [boolean, () => void] {
+  const [isHermes3, setIsHermes3] = useState(() => location.hash.startsWith('#/hermes3'))
+  const exitHermes3 = useCallback(() => {
+    setIsHermes3(false)
+    window.location.hash = '/'
+    window.location.reload()
+  }, [])
+  return [isHermes3, exitHermes3]
+}
+
+function Root() {
+  const [isHermes3, exitHermes3] = useHermes3Mode()
+
+  if (isHermes3) {
+    return <Hermes3App onBackToNormal={exitHermes3} />
+  }
+
+  return (
+    <StrictMode>
+      <ErrorBoundary label="root">
+        <QueryClientProvider client={queryClient}>
+          <I18nProvider>
+            <ThemeProvider>
+              <HapticsProvider>
+                <HashRouter>
+                  <App />
+                </HashRouter>
+              </HapticsProvider>
+            </ThemeProvider>
+          </I18nProvider>
+        </QueryClientProvider>
+      </ErrorBoundary>
+    </StrictMode>
+  )
+}
+
+createRoot(document.getElementById('root')!).render(<Root />)
