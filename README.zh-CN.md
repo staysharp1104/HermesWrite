@@ -1,208 +1,580 @@
-<p align="center">
-  <img src="assets/banner.png" alt="Hermes Agent" width="100%">
-</p>
+# Hermes Agent 核心技术实现分析
 
-# Hermes Agent ☤
-
-<p align="center">
-  <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent.nousresearch.com-FFD700?style=for-the-badge" alt="Documentation"></a>
-  <a href="https://discord.gg/NousResearch"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
-  <a href="https://github.com/NousResearch/hermes-agent/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License: MIT"></a>
-  <a href="https://nousresearch.com"><img src="https://img.shields.io/badge/Built%20by-Nous%20Research-blueviolet?style=for-the-badge" alt="Built by Nous Research"></a>
-  <a href="README.md"><img src="https://img.shields.io/badge/Lang-English-lightgrey?style=for-the-badge" alt="English"></a>
-  <a href="README.ur-pk.md"><img src="https://img.shields.io/badge/Lang-اردو-green?style=for-the-badge" alt="اردو"></a>
-</p>
-
-**由 [Nous Research](https://nousresearch.com) 构建的自进化 AI 代理。** 它是唯一内置学习闭环的智能代理——从经验中创建技能，在使用中改进技能，主动持久化知识，搜索过往对话，并在跨会话中逐步构建对你的深度理解。可以在 $5 的 VPS 上运行，也可以在 GPU 集群上运行，或者使用几乎零成本的 Serverless 基础设施。它不绑定你的笔记本——你可以在 Telegram 上与它对话，而它在云端 VM 上工作。
-
-支持任意模型——[Nous Portal](https://portal.nousresearch.com)、[OpenRouter](https://openrouter.ai)（200+ 模型）、[NVIDIA NIM](https://build.nvidia.com)（Nemotron）、[小米 MiMo](https://platform.xiaomimimo.com)、[z.ai/GLM](https://z.ai)、[Kimi/Moonshot](https://platform.moonshot.ai)、[MiniMax](https://www.minimax.io)、[Hugging Face](https://huggingface.co)、OpenAI，或自定义端点。使用 `hermes model` 即可切换——无需改代码，无锁定。
-
-<table>
-<tr><td><b>真正的终端界面</b></td><td>完整的 TUI，支持多行编辑、斜杠命令自动补全、对话历史、中断重定向和流式工具输出。</td></tr>
-<tr><td><b>随你所在</b></td><td>Telegram、Discord、Slack、WhatsApp、Signal 和 CLI——全部从单个网关进程运行。语音备忘录转写、跨平台对话连续性。</td></tr>
-<tr><td><b>闭环学习</b></td><td>代理管理记忆并定期自我提醒。复杂任务后自动创建技能。技能在使用中自我改进。FTS5 会话搜索配合 LLM 摘要实现跨会话回溯。<a href="https://github.com/plastic-labs/honcho">Honcho</a> 辩证式用户建模。兼容 <a href="https://agentskills.io">agentskills.io</a> 开放标准。</td></tr>
-<tr><td><b>定时自动化</b></td><td>内置 cron 调度器，支持向任何平台投递。日报、夜间备份、周审计——全部用自然语言描述，无人值守运行。</td></tr>
-<tr><td><b>委派与并行</b></td><td>生成隔离子代理处理并行工作流。编写 Python 脚本通过 RPC 调用工具，将多步管道压缩为零上下文开销的轮次。</td></tr>
-<tr><td><b>随处运行</b></td><td>六种终端后端——本地、Docker、SSH、Daytona、Singularity 和 Modal。Daytona 和 Modal 提供 Serverless 持久化——代理环境空闲时休眠、按需唤醒，空闲期间几乎零成本。$5 VPS 或 GPU 集群都能跑。</td></tr>
-<tr><td><b>研究就绪</b></td><td>批量轨迹生成、轨迹压缩——用于训练下一代工具调用模型。</td></tr>
-</table>
+> 基于 hermes-agent v0.17.0 源码分析
+> 覆盖：对话循环、工具注册、MCP 协议集成、多模型适配
 
 ---
 
-## 快速安装
+## 一、对话循环（Conversation Loop）
 
-```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+### 1.1 整体架构
+
+```
+用户输入
+    │
+    ▼
+build_turn_context()  ← 每次对话前的上下文准备
+    │
+    ▼  ┌─────────────────────────────────────────────┐
+    │  while (api_call_count < max_iterations         │
+    │         && iteration_budget.remaining > 0)      │  ← 主循环
+    │  ┌───────────────────────────────────────────┐  │
+    │  │ 1. 构建 api_messages（消息组装）          │  │
+    │  │ 2. 应用 prompt caching                    │  │
+    │  │ 3. 消息序列修复                           │  │
+    │  │ 4. 调用 LLM API                           │  │
+    │  │ 5. 处理 tool_calls                        │  │
+    │  │ 6. 追加 tool_result 到 messages           │  │
+    │  └───────────────────────────────────────────┘  │
+    └─────────────────────────────────────────────────┘
+    │
+    ▼
+final_response
 ```
 
-支持 Linux、macOS、WSL2 和 Android (Termux)。安装程序会自动处理平台特定的配置。
+**核心代码路径：**
+```
+run_agent.py
+  └─ AIAgent.run_conversation()       ← 转发器
+        └─ agent/conversation_loop.py
+              └─ run_conversation()    ← 主循环体 (~3500 LOC)
+```
 
-> **Android / Termux：** 已测试的手动安装路径请参考 [Termux 指南](https://hermes-agent.nousresearch.com/docs/getting-started/termux)。在 Termux 上，Hermes 会安装精选的 `.[termux]` 扩展，因为完整的 `.[all]` 扩展会拉取 Android 不兼容的语音依赖。
->
-> **Windows：** 在 PowerShell 中运行：
-> ```powershell
-> iex (irm https://hermes-agent.nousresearch.com/install.ps1)
-> ```
-> 安装完成后，可能需要重启终端，然后运行 `hermes` 开始对话。
+### 1.2 build_turn_context — 每轮上下文准备
 
-安装后：
+`agent/turn_context.py` 中的 `build_turn_context()` 负责每轮对话开始前的一次性准备工作：
 
-```bash
-source ~/.bashrc    # 重新加载 shell（或: source ~/.zshrc）
-hermes              # 开始对话！
+| 步骤 | 说明 | 文件 |
+|------|------|------|
+| stdio 守卫 | 确保子进程的 stdout 不污染 JSON-RPC 协议 | `agent/turn_context.py` |
+| 重试计数器重置 | 重置本轮的重试状态 | `agent/turn_context.py` |
+| 用户消息清洗 | sanitize surrogates / BOM / 控制字符 | `agent/message_sanitization.py` |
+| todo/nudge 注入 | 记忆回顾、技能提示、任务状态注入 | `agent/turn_context.py` |
+| system prompt 重建或恢复 | 三级结构（stable/context/volatile） | `agent/system_prompt.py` |
+| 崩溃恢复持久化 | 将当前消息持久化到 SQLite | `agent/turn_context.py` |
+| 预检压缩 | 超阈值时触发上下文压缩 | `agent/conversation_compression.py` |
+| pre_llm_call 插件钩子 | 允许外部插件修改本轮上下文 | `plugins/` |
+| 外部记忆预取 | 从 MemoryProvider 检索相关内容 | `agent/memory_manager.py` |
+| 消息历史加载 | 从 SQLite 加载历史消息并注入到本轮 | `agent/turn_context.py` |
+
+### 1.3 主循环核心逻辑
+
+```python
+while (api_call_count < agent.max_iterations
+       and agent.iteration_budget.remaining > 0) \
+       or agent._budget_grace_call:
+    
+    # ── 1. 构建 API 消息 ──
+    api_messages = build_api_messages(messages, system_prompt)
+    
+    # ── 2. 应用 Anthropic prompt caching ──
+    if agent._use_prompt_caching:
+        api_messages = apply_anthropic_cache_control(api_messages)
+    
+    # ── 3. 消息序列修复 ──
+    #     修复 role alternation（不能有两个同 role 连续）
+    api_messages = agent._sanitize_api_messages(api_messages)
+    api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
+    
+    # ── 4. 调用 LLM API ──
+    response = run_llm_execution_middleware(
+        api_kwargs, _perform_api_call, ...
+    )
+    
+    # ── 5. 处理 tool_calls 或返回结果 ──
+    if response.tool_calls:
+        for tool_call in response.tool_calls:
+            result = handle_function_call(tool_call.name, tool_call.args)
+            messages.append(tool_result_message(result))
+    else:
+        final_response = response.content
+        break
+    
+    api_call_count += 1
+```
+
+**关键设计决策：**
+
+- **同步阻塞模型**：整个循环在单线程中同步执行，不涉及 asyncio。这在 `run_agent.py` 中有明确注释："entirely synchronous, with interrupt checks"
+- **中断检查**：每个循环迭代开始时检查 `agent._interrupt_requested`，支持用户在工具循环中发送新消息打断
+- **预算控制**：两层预算 — `max_iterations`（硬限制）和 `iteration_budget`（软限制，允许最后一次优惠调用）
+- **Steer 机制**：`_drain_pending_steer()` 在每次 API 调用前消费用户发来的修正指令，注入到上一条 tool 消息中
+
+### 1.4 消息格式
+
+采用 OpenAI Chat Completions 格式：
+
+```python
+[
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "...", "tool_calls": [...]},
+    {"role": "tool", "content": "...", "tool_call_id": "..."},
+]
+```
+
+`reasoning` 字段单独存储在 assistant 消息中，UI 显示时为思考过程，API 调用时复制到 `reasoning_content`。
+
+### 1.5 API 调用路径
+
+```python
+# run_llm_execution_middleware()  →  中间件链
+    # └─ pre_api_request 钩子      →  插件系统（如 langfuse 追踪）
+        # └─ _perform_api_call()    →  实际 SDK 调用
+            # ├─ _interruptible_api_call()         → 非流式
+            # └─ _interruptible_streaming_api_call() → 流式
+```
+
+中断机制通过 `threading.Event` 实现：在单独的线程中执行 SDK 调用，主线程等待 Event，收到中断信号时关闭 HTTP 连接。
+
+---
+
+## 二、工具注册（Tool Registry）
+
+### 2.1 架构
+
+```
+tools/registry.py
+  └── ToolRegistry（单例）
+        ├── register()              ← 工具声明
+        ├── dispatch()              ← 工具调用
+        ├── get_definitions()       ← 获取 schema 列表
+        └── check_fn TTL 缓存       ← 可用性检查缓存
+            ↑
+tools/*.py                           ← 各个工具实现文件
+  └── 模块级 registry.register()      ← 自注册
+
+model_tools.py
+  ├── discover_builtin_tools()       ← 触发自动发现
+  ├── handle_function_call()         ← 工具调用入口
+  └── get_tool_definitions()         ← 工具列表入口
+```
+
+### 2.2 自动发现机制
+
+```python
+def discover_builtin_tools(tools_dir=None):
+    """扫描 tools/ 目录，导入所有自注册工具模块"""
+    # 1. 扫描 tools/*.py（排除 __init__, registry, mcp）
+    # 2. AST 静态分析：检测模块是否包含 registry.register() 调用
+    # 3. importlib.import_module() 动态导入
+    # 4. 模块级 registry.register() 自注册到 ToolRegistry
+```
+
+**关键特性：**
+- **AST 预检**：`_module_registers_tools()` 先做静态分析，跳过不包含 `registry.register()` 的模块，避免无用导入
+- **hermes3 扩展**：`discover_builtin_tools()` 额外扫描 `hermes3/tools/` 目录（hermes3 改造时添加）
+- **延迟导入**：`_module_registers_tools()` 只做语法树分析（`ast.parse`），不执行代码，性能开销极小
+
+### 2.3 ToolEntry 数据结构
+
+```python
+class ToolEntry:
+    __slots__ = (
+        "name",           # 工具名，如 "web_search"
+        "toolset",        # 工具集名，如 "web"
+        "schema",         # OpenAI function calling schema
+        "handler",        # 同步调用函数
+        "check_fn",       # 可用性检查函数（可选）
+        "requires_env",   # 必需的环境变量列表
+        "is_async",       # 是否异步执行
+        "description",    # 可读描述
+        "emoji",          # 显示 emoji
+        "max_result_size_chars",     # 结果截断上限
+        "dynamic_schema_overrides",  # 运行时 schema 覆盖
+    )
+```
+
+### 2.4 注册与调度流程
+
+```python
+# 注册（在 tools/*.py 模块级执行）
+registry.register(
+    name="web_search",
+    toolset="web",
+    schema=WEB_SEARCH_SCHEMA,    # OpenAI function calling schema
+    handler=lambda args, **kw: web_search_tool(...),
+    check_fn=check_web_api_key,  # 仅当 API key 配置时才可用
+    emoji="🔍",
+)
+
+# 调度（在 handle_function_call 中触发）
+def handle_function_call(name, args, task_id):
+    entry = registry.get(name)
+    if entry is None:
+        return f"Error: Unknown tool '{name}'"
+    # check_fn 缓存 30 秒
+    if entry.check_fn and not entry.check_fn(task_id=task_id):
+        return f"Error: Tool '{name}' requirements not met"
+    return entry.handler(args, task_id=task_id)
+```
+
+### 2.5 工具集系统（toolsets.py）
+
+```python
+TOOLSETS = {
+    "web": {
+        "description": "网页搜索与内容提取",
+        "tools": ["web_search", "web_extract"],
+        "includes": []            # 支持递归引用其他工具集
+    },
+    "hermes3": {                  # 小说创作工具集（hermes3 新增）
+        "description": "小说创作工具",
+        "tools": ["novel_character", "novel_worldbuilding", ...],
+        "includes": []
+    },
+}
+```
+
+`resolve_toolset()` 递归解析工具集，检测循环引用。工具集支持 `includes` 字段组合其他工具集。
+
+### 2.6 check_fn TTL 缓存
+
+```python
+# tools/registry.py 中
+_check_fn_cache: Dict[str, tuple[float, Optional[bool]]] = {}
+_CACHE_TTL = 30.0  # 秒
+```
+
+每次 `dispatch()` 调用时先查缓存，30 秒内不再重复执行 `check_fn`。这在频繁调用场景（如 delegate_task 批量调度）中显著减少开销。
+
+---
+
+## 三、MCP 协议集成
+
+### 3.1 架构
+
+```
+tools/mcp_tool.py (~4100 LOC)
+
+┌─ MCP 配置管理 ───────────────────────────────┐
+│  config.yaml 中的 mcpServers 字段              │
+│  ↓                                            │
+│  _load_mcp_config()                            │
+│  → 读取 mcpServers 配置                        │
+│  → 覆盖 yaml 字段到 server 配置                 │
+└──────────────────────────────────────────────┘
+              ↓
+┌─ MCP 服务端生命周期 ──────────────────────────┐
+│  MCPServerTask                                 │
+│    ├─ _run_http()    — SSE / Streamable HTTP   │
+│    ├─ _run_stdio()   — 子进程 JSON-RPC stdio   │
+│    └─ _run_websocket() — WS 直连              │
+└──────────────────────────────────────────────┘
+              ↓
+┌─ 工具桥接 ───────────────────────────────────┐
+│  register_mcp_servers()                       │
+│  → 连接 MCP Server                            │
+│  → list_tools() 获取工具列表                   │
+│  → registry.register() 注册为 hermes 内置工具   │
+└──────────────────────────────────────────────┘
+```
+
+### 3.2 传输协议支持
+
+| 协议类型 | 实现函数 | 说明 |
+|----------|----------|------|
+| **stdio** | `MCPServerTask._run_stdio()` | 子进程标准输入/输出 JSON-RPC |
+| **HTTP SSE** | `MCPServerTask._run_http()` | Server-Sent Events 流式传输 |
+| **Streamable HTTP** | `MCPServerTask._run_http()` | MCP 新版 HTTP 传输（`streamableHttpTransport`） |
+| **WebSocket** | `MCPServerTask._run_websocket()` | 直接 WebSocket 连接 |
+
+### 3.3 工具注册流程
+
+```python
+def register_mcp_servers(servers):
+    """将 MCP 服务器的工具注册为 hermes 内置工具"""
+    for name, cfg in servers.items():
+        # 1. 创建 MCP 连接会话
+        task = MCPServerTask(name, cfg)
+        task.start()
+        
+        # 2. 等待连接就绪
+        task.wait_ready()
+        
+        # 3. 获取服务器工具列表
+        tools = task.session.list_tools()
+        
+        # 4. 注册到 hermes 的 registry
+        for tool in tools:
+            registry.register(
+                name=f"mcp__{server_name}__{tool.name}",
+                toolset=f"mcp-{server_name}",
+                schema=convert_mcp_to_openai_schema(tool),
+                handler=mcp_call_handler(server_name, tool.name),
+                override=True,  # 允许 MCP 工具覆盖
+            )
+```
+
+**关键设计：**
+- 工具名前缀 `mcp__{server_name}__`，确保全局唯一
+- `override=True` 允许 MCP 工具替换同名的内置工具
+- 连接失败不阻塞启动，仅在 `model_tools.py` 中记录警告日志
+
+### 3.4 认证支持
+
+| 认证类型 | 实现 |
+|----------|------|
+| API Key / Bearer Token | HTTP Header 注入 |
+| OAuth 2.0 | `ElicitationHandler` 支持 OAuth 授权流程 |
+| 无认证 | 直接连接（localhost stdio 等） |
+
+OAuth 流程通过 `ElicitationHandler.__call__()` 拦截 MCP SDK 的授权请求，向用户展示授权 URL，等待用户完成授权后继续。
+
+### 3.5 配置示例
+
+```yaml
+# config.yaml
+mcpServers:
+  filesystem:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    enabled: true
+  web-search:
+    url: "https://api.example.com/mcp"
+    api_key: "${MCP_WEB_SEARCH_API_KEY}"
+    transport: "streamable-http"
+    timeout: 30
+    max_rpm: 10
 ```
 
 ---
 
-## 快速入门
+## 四、多模型适配（Multi-Model Adapter）
 
-```bash
-hermes              # 交互式 CLI — 开始对话
-hermes model        # 选择 LLM 提供商和模型
-hermes tools        # 配置启用的工具
-hermes config set   # 设置单个配置项
-hermes gateway      # 启动消息网关（Telegram、Discord 等）
-hermes setup        # 运行完整设置向导（一次性配置所有内容）
-hermes claw migrate # 从 OpenClaw 迁移（如果来自 OpenClaw）
-hermes update       # 更新到最新版本
-hermes doctor       # 诊断问题
+### 4.1 适配器架构概览
+
+```
+agent/
+├── anthropic_adapter.py          ~2590 LOC    ← Anthropic Messages API
+├── gemini_native_adapter.py      ~1002 LOC    ← Google Gemini Native API
+├── gemini_cloudcode_adapter.py   ~500 LOC     ← Google Cloud Code
+├── bedrock_adapter.py            ~300 LOC     ← AWS Bedrock
+├── azure_identity_adapter.py     ~200 LOC     ← Azure OpenAI
+├── codex_responses_adapter.py    ~1000 LOC    ← GitHub Codex
+├── antigravity_cloudcode_adapter.py           ← Antigravity Cloud
+├── antigravity_code_assist.py                 ← Antigravity Code Assist
+├── antigravity_oauth.py                       ← Antigravity OAuth
+├── google_code_assist.py                      ← Google Code Assist
+├── google_oauth.py                            ← Google OAuth
+├── lmstudio_reasoning.py                      ← LM Studio
+├── moonshot_schema.py                         ← Moonshot AI
+└── chat_completion_helpers.py                 ← 共用辅助函数
 ```
 
-📖 **[完整文档 →](https://hermes-agent.nousresearch.com/docs/)**
+### 4.2 适配器模式
 
----
+所有适配器遵循同一个设计模式：
 
-## 省去到处收集 API Key — Nous Portal
+```python
+# 1. Lazy SDK 导入
+def _get_anthropic_sdk():
+    """只在首次使用时导入，避免启动时 ~220ms 开销"""
+    if _anthropic_sdk is ...:
+        try:
+            import anthropic
+            _anthropic_sdk = anthropic
+        except ImportError:
+            _anthropic_sdk = None
+    return _anthropic_sdk
 
-Hermes 始终允许你使用任意服务商，这点不会改变。但如果你不想为模型、网页搜索、图像生成、TTS、云浏览器分别去申请五个不同的 API Key，**[Nous Portal](https://portal.nousresearch.com)** 用一个订阅就能覆盖全部：
+# 2. 消息格式转换
+def convert_openai_to_provider(messages):
+    """将 Hermes 内部 OpenAI 格式 → 厂商格式"""
+    ...
 
-- **300+ 模型** — 用 `/model <name>` 随时切换
-- **Tool Gateway** — 网页搜索（Firecrawl）、图像生成（FAL）、文本转语音（OpenAI）、云浏览器（Browser Use），全部通过订阅托管。无需额外注册任何账户。
+# 3. 请求构建
+def build_api_kwargs(messages, tools, **kwargs):
+    """构建厂商 SDK 的请求参数"""
+    ...
 
-全新安装时一条命令即可：
-
-```bash
-hermes setup --portal
+# 4. 响应解析
+def parse_provider_response(response):
+    """将厂商响应 → Hermes 内部格式"""
+    ...
 ```
 
-它会通过 OAuth 登录、把 Nous 设为推理服务商，并启用 Tool Gateway。随时用 `hermes portal info` 查看路由状态。完整说明见 [Tool Gateway 文档](https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-gateway)。
+### 4.3 核心适配器对比
 
-你随时可以按工具单独切回自己的 API Key — Gateway 是按工具粒度生效的，不是一刀切。
+| 适配器 | API 模式 | 核心差异 | SDK |
+|--------|----------|----------|-----|
+| **Anthropic** | `chat_completions` | 需要 `anthropic-version` header，支持 extended thinking、prompt caching | `anthropic` SDK |
+| **Gemini Native** | `chat_completions` | 消息格式与 OpenAI 差异大，需完整 schema 转换 | `google-genai` SDK |
+| **Bedrock** | `chat_completions` | AWS SigV4 签名认证 | `boto3` |
+| **Azure** | `chat_completions` | Azure AD 令牌认证 | `azure-identity` |
+| **Codex** | `codex_responses` | 独立 API 模式，不兼容 chat_completions | 自定义 HTTP |
+| **OpenAI 兼容** | `chat_completions` | 标准格式，最小转换 | `openai` SDK |
 
----
+### 4.4 AIAgent 中的适配器选择
 
-## CLI 与消息平台 快速对照
+```python
+# run_agent.py / agent_init.py 中
+@property
+def api_mode(self):
+    """决定使用哪种 API 调用方式"""
+    # 由 provider 和 config 共同决定
+    # chat_completions    → OpenAI 格式（标准路径）
+    # codex_responses     → GitHub Codex（独立路径）
+    # codex_app_server    → Codex App Server（独立子进程）
+    pass
 
-Hermes 有两种入口：用 `hermes` 启动终端 UI，或运行网关从 Telegram、Discord、Slack、WhatsApp、Signal 或 Email 与之对话。进入对话后，许多斜杠命令在两种界面中通用。
-
-| 操作 | CLI | 消息平台 |
-|------|-----|----------|
-| 开始对话 | `hermes` | 运行 `hermes gateway setup` + `hermes gateway start`，然后给机器人发消息 |
-| 开始新对话 | `/new` 或 `/reset` | `/new` 或 `/reset` |
-| 更换模型 | `/model [provider:model]` | `/model [provider:model]` |
-| 设置人格 | `/personality [name]` | `/personality [name]` |
-| 重试或撤销上一轮 | `/retry`、`/undo` | `/retry`、`/undo` |
-| 压缩上下文 / 查看用量 | `/compress`、`/usage`、`/insights [--days N]` | `/compress`、`/usage`、`/insights [days]` |
-| 浏览技能 | `/skills` 或 `/<skill-name>` | `/skills` 或 `/<skill-name>` |
-| 中断当前工作 | `Ctrl+C` 或发送新消息 | `/stop` 或发送新消息 |
-| 平台特定状态 | `/platforms` | `/status`、`/sethome` |
-
-完整命令列表请参阅 [CLI 指南](https://hermes-agent.nousresearch.com/docs/user-guide/cli) 和 [消息网关指南](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)。
-
----
-
-## 文档
-
-所有文档位于 **[hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/)**：
-
-| 章节 | 内容 |
-|------|------|
-| [快速开始](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) | 安装 → 设置 → 2 分钟内开始首次对话 |
-| [CLI 使用](https://hermes-agent.nousresearch.com/docs/user-guide/cli) | 命令、快捷键、人格、会话 |
-| [配置](https://hermes-agent.nousresearch.com/docs/user-guide/configuration) | 配置文件、提供商、模型、所有选项 |
-| [消息网关](https://hermes-agent.nousresearch.com/docs/user-guide/messaging) | Telegram、Discord、Slack、WhatsApp、Signal、Home Assistant |
-| [安全](https://hermes-agent.nousresearch.com/docs/user-guide/security) | 命令审批、DM 配对、容器隔离 |
-| [工具与工具集](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools) | 40+ 工具、工具集系统、终端后端 |
-| [技能系统](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) | 过程记忆、技能中心、创建技能 |
-| [记忆](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory) | 持久记忆、用户画像、最佳实践 |
-| [MCP 集成](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) | 连接任意 MCP 服务器扩展能力 |
-| [定时调度](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) | 定时任务与平台投递 |
-| [上下文文件](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files) | 影响每次对话的项目上下文 |
-| [架构](https://hermes-agent.nousresearch.com/docs/developer-guide/architecture) | 项目结构、代理循环、关键类 |
-| [贡献](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) | 开发设置、PR 流程、代码风格 |
-| [CLI 参考](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) | 所有命令和标志 |
-| [环境变量](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) | 完整环境变量参考 |
-
----
-
-## 从 OpenClaw 迁移
-
-如果你来自 OpenClaw，Hermes 可以自动导入你的设置、记忆、技能和 API 密钥。
-
-**首次安装时：** 安装向导（`hermes setup`）会自动检测 `~/.openclaw` 并在配置开始前提供迁移选项。
-
-**安装后任意时间：**
-
-```bash
-hermes claw migrate              # 交互式迁移（完整预设）
-hermes claw migrate --dry-run    # 预览将要迁移的内容
-hermes claw migrate --preset user-data   # 仅迁移用户数据，不含密钥
-hermes claw migrate --overwrite  # 覆盖已有冲突
+def _build_api_kwargs(self, messages, tools, stream=False):
+    """根据 api_mode 和 provider 构建 API 请求参数"""
+    if self.api_mode == "codex_responses":
+        return build_codex_kwargs(...)
+    # 标准 chat_completions 路径
+    kwargs = {
+        "model": self.model,
+        "messages": messages,
+        "tools": tools,
+        "stream": stream,
+        "max_tokens": self.max_tokens,
+    }
+    # 按 provider 注入特定参数
+    if self.provider == "anthropic":
+        kwargs.update(build_anthropic_specific_kwargs(self))
+    elif self.provider == "gemini":
+        kwargs.update(build_gemini_specific_kwargs(self))
+    return kwargs
 ```
 
-导入内容：
-- **SOUL.md** — 人格文件
-- **记忆** — MEMORY.md 和 USER.md 条目
-- **技能** — 用户创建的技能 → `~/.hermes/skills/openclaw-imports/`
-- **命令白名单** — 审批模式
-- **消息设置** — 平台配置、允许用户、工作目录
-- **API 密钥** — 白名单中的密钥（Telegram、OpenRouter、OpenAI、Anthropic、ElevenLabs）
-- **TTS 资产** — 工作区音频文件
-- **工作区指令** — AGENTS.md（使用 `--workspace-target`）
+### 4.5 Anthropic 适配器深度分析
 
-使用 `hermes claw migrate --help` 查看所有选项，或使用 `openclaw-migration` 技能进行交互式代理引导迁移（含干运行预览）。
+**认证方式（三种）：**
 
----
+| 方式 | 凭证来源 | 认证头 |
+|------|----------|--------|
+| API Key | `ANTHROPIC_API_KEY` | `x-api-key: sk-ant-*` |
+| OAuth Token | `~/.claude.json` | `Authorization: Bearer` |
+| Bedrock | AWS 凭证 | SigV4 签名 |
 
-## 贡献
+**Prompt Caching 实现：**
 
-欢迎贡献！请参阅 [贡献指南](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) 了解开发设置、代码风格和 PR 流程。
-
-贡献者快速开始——使用标准安装器，然后在它创建的完整 git checkout 中开发：
-`$HERMES_HOME/hermes-agent`（通常是 `~/.hermes/hermes-agent`）。这会匹配
-`hermes update`、托管 venv、lazy dependencies、gateway 和 docs tooling 使用的布局。
-
-```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-cd "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"
-uv pip install -e ".[all,dev]"
-scripts/run_tests.sh
+```python
+# agent/anthropic_adapter.py
+def apply_cache_control(messages, cache_ttl):
+    """在 system prompt 和最后 3 条消息上注入 cache_control"""
+    # 1. system message → ephemeral cache
+    # 2. 最后 3 条 user/tool 消息 → ephemeral cache
+    # 效果：多轮对话减少 ~75% 输入 token 成本
 ```
 
-手动克隆备用路径（用于一次性 clone / CI，或你明确不想使用 managed install layout 时）：
+**Thinking 模式（两种）：**
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv venv venv --python 3.11
-source venv/bin/activate
-uv pip install -e ".[all,dev]"
-python -m pytest tests/ -q
+| 模式 | 旧版（Claude 3.x） | 新版（Claude 4.x+） |
+|------|-------------------|-------------------|
+| 机制 | `thinking.type: enabled` + `budget_tokens` | `thinking.type: enabled` + `thinking_budget.type: adaptive` |
+| 温度 | 不支持 | 支持（adaptive mode 下自动管理） |
+| 检测 | `_need_old_extended_thinking()` | `_need_new_extended_thinking()` |
+
+### 4.6 Gemini 原生适配器深度分析
+
+**为什么需要独立适配器：**
+
+```
+OpenAI 格式                    Gemini 原生格式
+─────────────────              ─────────────────
+messages: [{                   contents: [{
+  role: "user",                  role: "user",
+  content: "hello"               parts: [{text: "hello"}]
+}]                            }]
+tools: [{                      tools: [{
+  type: "function",              function_declarations: [{
+  function: {                      name: "...",
+    name: "...",                   parameters: {...}
+    parameters: {...}            }]
+  }                            }]
+}]                            }
 ```
 
+**关键转换函数：**
+- `openai_messages_to_gemini_contents()` — 消息格式转换
+- `openai_tools_to_gemini_declarations()` — 工具格式转换
+- `sanitize_gemini_tool_parameters()` — 清洗 Gemini 不支持的参数描述格式
+
+### 4.7 provider 选择链
+
+```
+用户配置 "deepseek-chat"
+    → provider = "openai-compatible"
+    → base_url = "https://api.deepseek.com"
+    → api_mode = "chat_completions"
+    → 标准 OpenAI SDK 调用
+
+用户配置 "anthropic/claude-sonnet-4"
+    → provider = "anthropic"
+    → api_mode = "chat_completions"
+    → Anthropic SDK + 特殊参数处理
+```
+
+Provider 的解析在 `hermes_cli/runtime_provider.py` 中完成，支持：
+- 预设 provider 列表（openai, anthropic, gemini, openrouter 等）
+- 自定义 provider（openai-compatible，需指定 base_url）
+- provider 排序/竞价（`providers_order` / `provider_sort`）
+- provider 权限控制（`providers_allowed` / `providers_ignored`）
+
 ---
 
-## 社区
+## 五、四者协同关系
 
-- 💬 [Discord](https://discord.gg/NousResearch)
-- 📚 [技能中心](https://agentskills.io)
-- 🐛 [问题反馈](https://github.com/NousResearch/hermes-agent/issues)
-- 💡 [讨论区](https://github.com/NousResearch/hermes-agent/discussions)
-- 🔌 [HermesClaw](https://github.com/AaronWong1999/hermesclaw) — 社区微信桥接：在同一微信账号上运行 Hermes Agent 和 OpenClaw。
+```
+用户输入
+    │
+    ▼
+┌─ 对话循环 (conversation_loop.py) ──────────────────────┐
+│                                                         │
+│  1. build_turn_context()                                 │
+│     ├─ 加载记忆 (memory_manager)                         │
+│     ├─ 重建 system prompt (prompt_builder)               │
+│     └─ 触发 pre_llm_call 插件                             │
+│                                                         │
+│  2. 构建 api_messages                                    │
+│     ├─ 加入工具定义 ← get_tool_definitions()              │
+│     │                    └─ ToolRegistry                   │
+│     │                       ├─ 内置工具 (tools/*.py)      │
+│     │                       └─ MCP 工具 (mcp_tool.py)     │
+│     └─ 加入缓存控制 ← Anthropic prompt caching            │
+│                                                         │
+│  3. 调用 LLM ← _build_api_kwargs()                       │
+│     │              └─ 适配器选择                          │
+│     │                 ├─ AnthropicAdapter                 │
+│     │                 ├─ GeminiAdapter                    │
+│     │                 └─ OpenAIAdapter (默认)             │
+│     ▼                                                   │
+│  response ← {content | tool_calls}                       │
+│                                                         │
+│  4. 处理 tool_calls                                      │
+│     └─ handle_function_call()                            │
+│          └─ registry.dispatch()                          │
+│             ├─ 内置函数直接调用                           │
+│             └─ MCP 工具 → MCPServerTask.call_tool()       │
+│                                                         │
+│  5. 循环直到无 tool_calls 或达到限制                      │
+└─────────────────────────────────────────────────────────┘
+    │
+    ▼
+final_response
+```
+
+### 关键性能特性
+
+| 特性 | 机制 | 效果 |
+|------|------|------|
+| Prompt Caching | Anthropic cache_control breakpoints | 多轮对话减少 ~75% 输入 token 成本 |
+| 中断机制 | threading.Event + HTTP 连接关闭 | 用户可随时打断工具循环 |
+| check_fn TTL | 30 秒缓存 check_fn 结果 | 高频工具调度减少 I/O |
+| MCP 连接池 | 多 Server 并行连接 | 工具调用不阻塞 |
+| SDk 延迟导入 | Lazy import + sentinel 标记 | 启动时不加载 SDK (~220ms/个) |
+| 预算双重控制 | max_iterations + iteration_budget | 防止无限循环和 token 透支 |
 
 ---
 
-## 许可证
+## 六、对 hermes3 的启示
 
-MIT — 详见 [LICENSE](LICENSE)。
-
-由 [Nous Research](https://nousresearch.com) 构建。
+| hermes3 需求 | 可复用机制 |
+|-------------|-----------|
+| 多 Agent 调度 | 对话循环 + delegate_tool 子代理派生 |
+| 14 个 Agent 工具 | ToolRegistry + novel_* 工具注册 |
+| 本地文件读写 | MCP 协议（文件系统 Server） |
+| 多模型切换 | Provider 适配器体系直接复用 |
+| Agent Skill.md 加载 | 对话循环的 system prompt 构建机制 |
